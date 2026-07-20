@@ -140,14 +140,12 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
     """Maneja el procesamiento de la conversación con el ADK Runner en background."""
     try:
         # 1. Asegurar que la sesión existe en el InMemorySessionService de ADK
-        try:
-            await session_service.get_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
-        except Exception:
-            # Si no existe en el servicio en memoria de ADK (ej: por reinicio), la creamos
+        session = await session_service.get_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
+        if session is None:
             await session_service.create_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
+            session = await session_service.get_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
         
         # 2. Inyectar variables críticas del contexto en el estado de sesión para las herramientas
-        session = await session_service.get_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
         session.state["phone"] = phone
         session.state["session_id"] = session_id
         
