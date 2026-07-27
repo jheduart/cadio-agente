@@ -117,18 +117,19 @@ def update_session_timestamp(phone: str, session_id: str):
         if phone in MOCK_ACTIVE_SESSIONS:
             MOCK_ACTIVE_SESSIONS[phone]["updatedAt"] = now
 
-def send_outbound_message(phone: str, message: str):
+def send_outbound_message(phone: str, message: str, account_sid: str = "AC_default"):
     """Llama de forma síncrona a la API de salida de Codio para responder por WhatsApp."""
     url = f"{CODIO_API_URL}/api/v1/messages/send"
     payload = {
         "to": phone,
         "type": "text",
-        "body": message
+        "body": message,
+        "accountSid": account_sid
     }
     
-    print(f"[OUTBOUND] Enviando respuesta a Codio para: {phone}...")
+    print(f"[OUTBOUND] Enviando respuesta a Codio para: {phone} (Cuenta: {account_sid})...")
     try:
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, headers={"x-account-sid": account_sid}, timeout=10)
         if response.status_code == 200:
             print(f"[OUTBOUND] Mensaje enviado exitosamente a través de Codio. Respuesta: {response.json()}")
         else:
@@ -136,7 +137,7 @@ def send_outbound_message(phone: str, message: str):
     except Exception as e:
         print(f"[OUTBOUND ERROR] No se pudo conectar a la API de salida de Codio: {e}")
 
-async def process_agent_interaction(phone: str, message_body: str, session_id: str):
+async def process_agent_interaction(phone: str, message_body: str, session_id: str, account_sid: str = "AC_default"):
     """Maneja el procesamiento de la conversación con el ADK Runner en background."""
     try:
         # 1. Asegurar que la sesión existe en el InMemorySessionService de ADK
@@ -148,10 +149,11 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
         # 2. Inyectar variables críticas del contexto en el estado de sesión para las herramientas
         session.state["phone"] = phone
         session.state["session_id"] = session_id
+        session.state["account_sid"] = account_sid
         
         # 3. Ejecutar el agente ADK de forma asíncrona
         response_text = ""
-        print(f"[ADK] Ejecutando agente para {phone} en sesión {session_id}...")
+        print(f"[ADK] Ejecutando agente para {phone} en sesión {session_id} (Cuenta: {account_sid})...")
         
         new_msg = types.Content(
             role="user",
@@ -184,7 +186,7 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
             
         # 5. Despachar el mensaje de salida de vuelta al usuario final a través de Codio
         if response_text:
-            send_outbound_message(phone, response_text)
+            send_outbound_message(phone, response_text, account_sid)
         else:
             print("[ADK WARNING] El agente no generó respuesta de texto final.")
             
@@ -194,7 +196,8 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
         # Enviar mensaje de error fallback para evitar que el chat quede colgado
         send_outbound_message(
             phone, 
-            "Disculpas, estoy experimentando dificultades técnicas temporales. Por favor, reintenta tu consulta en unos momentos. 🩺"
+            "Disculpas, estoy experimentando dificultades técnicas temporales. Por favor, reintenta tu consulta en unos momentos. 🩺",
+            account_sid
         )
 
 @app.post("/webhook")
@@ -213,17 +216,49 @@ async def handle_codio_webhook(request: Request, background_tasks: BackgroundTas
         data = payload.get("data", {})
         phone = data.get("phone")
         body_text = data.get("body")
+        account_sid = data.get("accountSid", "AC_default")
+        session_id = data.get("sessionId")
         
         if not phone or not body_text:
             print("[WEBHOOK ERROR] El payload no contiene campos 'phone' o 'body' válidos.")
             raise HTTPException(status_code=400, detail="Missing phone or body fields")
             
-        # 1. Resolver o crear el UUID de sesión para este número de teléfono (con TTL de 24hs)
-        session_id = resolve_active_session(phone)
+        if not session_id:
+            # Fallback en caso de que no venga el session_id (ej. pruebas directas antiguas)
+            session_id = resolve_active_session(phone)
         
+        # Verificar el modo de atención de la sesión en Firestore
+        db = get_firestore_client()
+        if db:
+            try:
+                # Ruta SaaS oficial: cuentas/{account_sid}/sesiones/{session_id}
+                sesion_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
+                sesion_doc = sesion_ref.get()
+                if sesion_doc.exists:
+                    sesion_data = sesion_doc.to_dict()
+                    atencion = sesion_data.get("atencion", {})
+                    modo = atencion.get("modo", "bot")
+                    
+                    if modo in ["en_atencion_humana", "esperando_asesor"]:
+                        print(f"[WEBHOOK] Ignorando mensaje de {phone} (Sesión: {session_id}) porque está en modo: {modo}")
+                        return {"status": "ignored", "reason": f"session_in_human_attention_{modo}"}
+                    
+                    # Asegurar que comience en modo bot si no tiene atencion inicializada
+                    if "atencion" not in sesion_data:
+                        sesion_ref.update({
+                            "atencion": {
+                                "modo": "bot",
+                                "asesor_id": None,
+                                "equipo_id": None,
+                                "solicitado_at": None
+                            }
+                        })
+            except Exception as e:
+                print(f"[WEBHOOK WARNING] Error al consultar estado de atención en Firestore: {e}")
+            
         # 2. Despachar el procesamiento pesado del Agente ADK a una tarea de fondo (asíncrona)
         # Esto permite responderle 200 OK inmediatamente al webhook de Codio
-        background_tasks.add_task(process_agent_interaction, phone, body_text, session_id)
+        background_tasks.add_task(process_agent_interaction, phone, body_text, session_id, account_sid)
         
         return {"status": "accepted", "session_id": session_id}
         

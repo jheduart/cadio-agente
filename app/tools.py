@@ -210,3 +210,60 @@ async def end_conversation(summary_of_session: str, tool_context: ToolContext) -
         "session_id": session_id,
         "summary_recorded": True
     }
+
+async def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, Any]:
+    """Deriva la conversación actual a un asesor humano cuando el usuario lo solicite explícitamente, o cuando sus preguntas excedan el alcance de la clínica.
+
+    Args:
+        motivo: Breve explicación del por qué se deriva el chat (ej. 'El usuario solicita hablar con un asesor', 'Pregunta sobre costos médicos complejos').
+
+    Returns:
+        dict indicando que la derivación ha sido registrada exitosamente.
+    """
+    session_id = tool_context.state.get("session_id")
+    phone = tool_context.state.get("phone")
+    account_sid = tool_context.state.get("account_sid", "AC_default")
+
+    print(f"[HANDOFF] Ejecutando derivar_a_asesor para sesión {session_id} | Teléfono: {phone} | Cuenta: {account_sid} | Motivo: {motivo}")
+
+    # Indicar a la aplicación que limpie este mapeo de sesión para detener la IA
+    tool_context.state["session_closed"] = True
+
+    db = get_firestore_client()
+    equipo_id = "default"
+    
+    if db:
+        try:
+            # 1. Buscar el primer equipo disponible bajo la ruta SaaS
+            equipos_ref = db.collection("cuentas").document(account_sid).collection("equipos")
+            equipos_docs = equipos_ref.limit(1).get()
+            for doc in equipos_docs:
+                equipo_id = doc.id
+                break
+                
+            # 2. Actualizar el estado de la sesión en Firestore en la ruta SaaS
+            sesion_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
+            
+            sesion_ref.update({
+                "atencion.modo": "esperando_asesor",
+                "atencion.equipo_id": equipo_id,
+                "atencion.asesor_id": None,
+                "atencion.motivo_derivacion": motivo,
+                "atencion.solicitado_at": datetime.datetime.utcnow()
+            })
+            
+            # Borrar la sesión activa local/antigua para evitar colisiones
+            db.collection("active_sessions").document(phone).delete()
+            print(f"[HANDOFF] Sesión {session_id} marcada exitosamente en Firestore como 'esperando_asesor' bajo equipo: {equipo_id}")
+        except Exception as e:
+            print(f"[HANDOFF ERROR] Error al guardar derivación en Firestore: {e}")
+    else:
+        print("[HANDOFF WARNING] Sin conexión a Firestore. Ignorando guardado físico.")
+
+    return {
+        "status": "success",
+        "message": "Conversación derivada a un asesor humano de forma exitosa.",
+        "session_id": session_id,
+        "equipo_id": equipo_id,
+        "handoff_triggered": True
+    }
