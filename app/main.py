@@ -33,63 +33,74 @@ except Exception as e:
     print(f"[STARTUP ERROR] Error inicializando componentes ADK: {e}")
     traceback.print_exc()
 
-def resolve_active_session(phone: str) -> str:
-    """Verifica en Firestore (o local mock) si existe una sesión activa de menos de 24hs.
+def resolve_active_session(phone: str, account_sid: str = "AC_default") -> str:
+    """Verifica en Firestore si existe una sesión SaaS activa.
     
-    Retorna el session_id activo o genera uno nuevo si expiró o no existe.
+    Retorna el session_id activo o genera uno nuevo si no existe.
     """
     db = get_firestore_client()
     now = datetime.datetime.utcnow()
-    one_day_ago = now - datetime.timedelta(hours=24)
     
     session_id = None
     
     if db:
         try:
-            doc_ref = db.collection("active_sessions").document(phone)
-            doc = doc_ref.get()
+            contact_ref = db.collection("cuentas").document(account_sid).collection("contactos").document(phone)
+            contact_doc = contact_ref.get()
             
-            if doc.exists:
-                data = doc.to_dict()
-                updated_at_str = data.get("updatedAt")
-                if updated_at_str:
-                    updated_at = datetime.datetime.fromisoformat(updated_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if updated_at > one_day_ago:
-                        session_id = data.get("active_session_id")
-                        print(f"[SESSION] Reutilizando sesión activa de Firestore: {session_id} para {phone}")
+            if contact_doc.exists:
+                contact_data = contact_doc.to_dict()
+                active_session_id = contact_data.get("sesionActivaId")
+                if active_session_id:
+                    # Verificar si la sesión existe y está abierta
+                    session_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(active_session_id)
+                    session_doc = session_ref.get()
+                    if session_doc.exists:
+                        session_data = session_doc.to_dict()
+                        if session_data.get("estado") == "abierta":
+                            session_id = active_session_id
+                            print(f"[SESSION] Reutilizando sesión SaaS activa: {session_id} para {phone}")
             
             if not session_id:
-                session_id = str(uuid.uuid4())
-                # Crear mapeo de sesión activa
-                doc_ref.set({
-                    "active_session_id": session_id,
-                    "updatedAt": now.isoformat()
+                session_id = f"sess_{str(uuid.uuid4().hex)[:11]}"
+                # Crear sesión en la ruta SaaS
+                session_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
+                session_ref.set({
+                    "contactoTelefono": phone,
+                    "estado": "abierta",
+                    "actividadGen": 1,
+                    "abiertaAt": now,
+                    "ultimaActividadAt": now,
+                    "ultimoMensajeAt": now,
+                    "ultimoMensajePreview": "[Creado por agente]",
+                    "atencion": {
+                        "modo": "bot",
+                        "asesor_id": None,
+                        "equipo_id": None,
+                        "solicitado_at": None
+                    }
                 })
-                # Inicializar documento de la sesión
-                db.collection("sessions").document(session_id).set({
-                    "id": session_id,
-                    "phone": phone,
-                    "status": "active",
-                    "createdAt": now.isoformat(),
-                    "lastInteraction": now.isoformat()
-                })
-                print(f"[SESSION] Nueva sesión creada en Firestore: {session_id} para {phone}")
+                # Actualizar puntero en el contacto
+                contact_ref.set({
+                    "sesionActivaId": session_id,
+                    "ultimaInteraccionAt": now,
+                    "telefono": phone
+                }, merge=True)
+                print(f"[SESSION] Nueva sesión SaaS creada: {session_id} para {phone}")
                 
         except Exception as e:
-            print(f"[SESSION ERROR] Error interactuando con Firestore para sesión: {e}. Usando fallback local.")
-            db = None # Forzar fallback local en catch
+            print(f"[SESSION ERROR] Error interactuando con Firestore para sesión SaaS: {e}. Usando fallback local.")
+            db = None
             
     if not db:
         # Fallback local mock
         active_sess = MOCK_ACTIVE_SESSIONS.get(phone)
         if active_sess:
-            updated_at = active_sess["updatedAt"]
-            if updated_at > one_day_ago:
-                session_id = active_sess["active_session_id"]
-                print(f"[SESSION] Reutilizando sesión activa local: {session_id} para {phone}")
+            session_id = active_sess["active_session_id"]
+            print(f"[SESSION] Reutilizando sesión activa local: {session_id} para {phone}")
         
         if not session_id:
-            session_id = str(uuid.uuid4())
+            session_id = f"sess_{str(uuid.uuid4().hex)[:11]}"
             MOCK_ACTIVE_SESSIONS[phone] = {
                 "active_session_id": session_id,
                 "updatedAt": now
@@ -110,13 +121,8 @@ def update_session_timestamp(phone: str, session_id: str, account_sid: str = "AC
                 "ultimaActividadAt": now,
                 "ultimoMensajeAt": now
             }, merge=True)
-            # Compatibilidad para active_sessions con merge=True para evitar 404
-            db.collection("active_sessions").document(phone).set({
-                "updatedAt": now.isoformat(),
-                "sessionId": session_id
-            }, merge=True)
         except Exception as e:
-            print(f"[SESSION ERROR] No se pudo actualizar timestamp en Firestore: {e}")
+            print(f"[SESSION ERROR] No se pudo actualizar timestamp en Firestore SaaS: {e}")
     else:
         if phone in MOCK_ACTIVE_SESSIONS:
             MOCK_ACTIVE_SESSIONS[phone]["updatedAt"] = now

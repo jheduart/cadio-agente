@@ -170,9 +170,17 @@ async def end_conversation(summary_of_session: str, tool_context: ToolContext) -
     Returns:
         dict indicando que la sesión ha sido cerrada exitosamente.
     """
-    # Obtener el ID de la sesión y el número de teléfono del estado del ToolContext de ADK
-    session_id = tool_context.state.get("session_id")
-    phone = tool_context.state.get("phone")
+    # Obtener el ID de la sesión y el número de teléfono (priorizando las propiedades nativas de la sesión de ADK)
+    session_id = None
+    phone = None
+    if hasattr(tool_context, "session") and tool_context.session:
+        session_id = tool_context.session.id
+        phone = tool_context.session.user_id
+    if not session_id and tool_context.state:
+        session_id = tool_context.state.get("session_id")
+    if not phone and tool_context.state:
+        phone = tool_context.state.get("phone")
+
 
     print(f"[LIFECYCLE] Ejecutando end_conversation para sesión {session_id} | Teléfono: {phone}")
 
@@ -180,28 +188,25 @@ async def end_conversation(summary_of_session: str, tool_context: ToolContext) -
     tool_context.state["session_closed"] = True
 
     db = get_firestore_client()
-    session_data = {
-        "id": session_id,
-        "phone": phone,
-        "status": "closed",
-        "summary": summary_of_session,
-        "closedAt": datetime.datetime.utcnow().isoformat(),
-        "lastInteraction": datetime.datetime.utcnow().isoformat()
-    }
+    account_sid = tool_context.state.get("account_sid", "AC_default")
 
     if db:
         try:
-            # 1. Actualizar el estado y resumen en la colección de sesiones
-            db.collection("sessions").document(session_id).set(session_data, merge=True)
-            # 2. Borrar de forma segura la sesión activa para este teléfono para forzar nuevo UUID en el re-saludo
-            db.collection("active_sessions").document(phone).delete()
-            print(f"[LIFECYCLE] Sesión {session_id} marcada como cerrada en Firestore con éxito.")
+            # 1. Actualizar el estado y resumen en la colección SaaS de sesiones
+            db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id).update({
+                "estado": "cerrada",
+                "cerradaAt": datetime.datetime.utcnow(),
+                "resumenBot": summary_of_session
+            })
+            # 2. Desvincular el session id del contacto para forzar nuevo UUID en el re-saludo
+            db.collection("cuentas").document(account_sid).collection("contactos").document(phone).update({
+                "sesionActivaId": None
+            })
+            print(f"[LIFECYCLE] Sesión SaaS {session_id} marcada como cerrada en Firestore con éxito.")
         except Exception as e:
-            print(f"[LIFECYCLE ERROR] Error interactuando con Firestore en end_conversation: {e}")
-            # Fallback local
+            print(f"[LIFECYCLE ERROR] Error interactuando con Firestore SaaS en end_conversation: {e}")
             MOCK_ACTIVE_SESSIONS.pop(phone, None)
     else:
-        # Fallback local
         MOCK_ACTIVE_SESSIONS.pop(phone, None)
 
     return {
@@ -220,9 +225,22 @@ async def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, 
     Returns:
         dict indicando que la derivación ha sido registrada exitosamente.
     """
-    session_id = tool_context.state.get("session_id")
-    phone = tool_context.state.get("phone")
-    account_sid = tool_context.state.get("account_sid", "AC_default")
+    # Obtener las variables críticas priorizando las propiedades nativas de la sesión de ADK
+    session_id = None
+    phone = None
+    account_sid = "AC_default"
+    if hasattr(tool_context, "session") and tool_context.session:
+        session_id = tool_context.session.id
+        phone = tool_context.session.user_id
+        if hasattr(tool_context.session, "state") and tool_context.session.state:
+            account_sid = tool_context.session.state.get("account_sid", "AC_default")
+    if not session_id and tool_context.state:
+        session_id = tool_context.state.get("session_id")
+    if not phone and tool_context.state:
+        phone = tool_context.state.get("phone")
+    if account_sid == "AC_default" and tool_context.state:
+        account_sid = tool_context.state.get("account_sid", "AC_default")
+
 
     print(f"[HANDOFF] Ejecutando derivar_a_asesor para sesión {session_id} | Teléfono: {phone} | Cuenta: {account_sid} | Motivo: {motivo}")
 
@@ -252,8 +270,6 @@ async def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, 
                 "atencion.solicitado_at": datetime.datetime.utcnow()
             })
             
-            # Borrar la sesión activa local/antigua para evitar colisiones
-            db.collection("active_sessions").document(phone).delete()
             print(f"[HANDOFF] Sesión {session_id} marcada exitosamente en Firestore como 'esperando_asesor' bajo equipo: {equipo_id}")
         except Exception as e:
             print(f"[HANDOFF ERROR] Error al guardar derivación en Firestore: {e}")
