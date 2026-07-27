@@ -98,19 +98,23 @@ def resolve_active_session(phone: str) -> str:
             
     return session_id
 
-def update_session_timestamp(phone: str, session_id: str):
+def update_session_timestamp(phone: str, session_id: str, account_sid: str = "AC_default"):
     """Actualiza la marca de tiempo de la última interacción de la sesión en Firestore o local."""
     db = get_firestore_client()
     now = datetime.datetime.utcnow()
     
     if db:
         try:
-            db.collection("active_sessions").document(phone).update({
-                "updatedAt": now.isoformat()
-            })
-            db.collection("sessions").document(session_id).update({
-                "lastInteraction": now.isoformat()
-            })
+            # Ruta SaaS oficial de la sesión
+            db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id).set({
+                "ultimaActividadAt": now,
+                "ultimoMensajeAt": now
+            }, merge=True)
+            # Compatibilidad para active_sessions con merge=True para evitar 404
+            db.collection("active_sessions").document(phone).set({
+                "updatedAt": now.isoformat(),
+                "sessionId": session_id
+            }, merge=True)
         except Exception as e:
             print(f"[SESSION ERROR] No se pudo actualizar timestamp en Firestore: {e}")
     else:
@@ -182,7 +186,7 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
                 print(f"[SESSION ERROR] Error borrando sesión de ADK: {e}")
         else:
             # Si sigue abierta, actualizamos su marca de última interacción
-            update_session_timestamp(phone, session_id)
+            update_session_timestamp(phone, session_id, account_sid)
             
         # 5. Despachar el mensaje de salida de vuelta al usuario final a través de Codio
         if response_text:
