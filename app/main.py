@@ -1,10 +1,8 @@
 import os
-import uuid
 import datetime
 import traceback
 import requests
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -32,100 +30,6 @@ try:
 except Exception as e:
     print(f"[STARTUP ERROR] Error inicializando componentes ADK: {e}")
     traceback.print_exc()
-
-def resolve_active_session(phone: str, account_sid: str = "AC_default") -> str:
-    """Verifica en Firestore si existe una sesión SaaS activa.
-    
-    Retorna el session_id activo o genera uno nuevo si no existe.
-    """
-    db = get_firestore_client()
-    now = datetime.datetime.utcnow()
-    
-    session_id = None
-    
-    if db:
-        try:
-            contact_ref = db.collection("cuentas").document(account_sid).collection("contactos").document(phone)
-            contact_doc = contact_ref.get()
-            
-            if contact_doc.exists:
-                contact_data = contact_doc.to_dict()
-                active_session_id = contact_data.get("sesionActivaId")
-                if active_session_id:
-                    # Verificar si la sesión existe y está abierta
-                    session_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(active_session_id)
-                    session_doc = session_ref.get()
-                    if session_doc.exists:
-                        session_data = session_doc.to_dict()
-                        if session_data.get("estado") == "abierta":
-                            session_id = active_session_id
-                            print(f"[SESSION] Reutilizando sesión SaaS activa: {session_id} para {phone}")
-            
-            if not session_id:
-                session_id = f"sess_{str(uuid.uuid4().hex)[:11]}"
-                # Crear sesión en la ruta SaaS
-                session_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
-                session_ref.set({
-                    "contactoTelefono": phone,
-                    "estado": "abierta",
-                    "actividadGen": 1,
-                    "abiertaAt": now,
-                    "ultimaActividadAt": now,
-                    "ultimoMensajeAt": now,
-                    "ultimoMensajePreview": "[Creado por agente]",
-                    "atencion": {
-                        "modo": "bot",
-                        "asesor_id": None,
-                        "equipo_id": None,
-                        "solicitado_at": None
-                    }
-                })
-                # Actualizar puntero en el contacto
-                contact_ref.set({
-                    "sesionActivaId": session_id,
-                    "ultimaInteraccionAt": now,
-                    "telefono": phone
-                }, merge=True)
-                print(f"[SESSION] Nueva sesión SaaS creada: {session_id} para {phone}")
-                
-        except Exception as e:
-            print(f"[SESSION ERROR] Error interactuando con Firestore para sesión SaaS: {e}. Usando fallback local.")
-            db = None
-            
-    if not db:
-        # Fallback local mock
-        active_sess = MOCK_ACTIVE_SESSIONS.get(phone)
-        if active_sess:
-            session_id = active_sess["active_session_id"]
-            print(f"[SESSION] Reutilizando sesión activa local: {session_id} para {phone}")
-        
-        if not session_id:
-            session_id = f"sess_{str(uuid.uuid4().hex)[:11]}"
-            MOCK_ACTIVE_SESSIONS[phone] = {
-                "active_session_id": session_id,
-                "updatedAt": now
-            }
-            print(f"[SESSION] Nueva sesión local creada: {session_id} para {phone}")
-            
-    return session_id
-
-def update_session_timestamp(phone: str, session_id: str, account_sid: str = "AC_default"):
-    """Actualiza la marca de tiempo de la última interacción de la sesión en Firestore o local."""
-    db = get_firestore_client()
-    now = datetime.datetime.utcnow()
-    
-    if db:
-        try:
-            # Ruta SaaS oficial de la sesión
-            db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id).set({
-                "ultimaActividadAt": now,
-                "ultimoMensajeAt": now
-            }, merge=True)
-        except Exception as e:
-            print(f"[SESSION ERROR] No se pudo actualizar timestamp en Firestore SaaS: {e}")
-    else:
-        if phone in MOCK_ACTIVE_SESSIONS:
-            MOCK_ACTIVE_SESSIONS[phone]["updatedAt"] = now
 
 def send_outbound_message(phone: str, message: str, account_sid: str = "AC_default"):
     """Llama de forma síncrona a la API de salida de Codio para responder por WhatsApp."""
@@ -183,16 +87,11 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
         is_closed = session.state.get("session_closed", False)
         if is_closed:
             print(f"[LIFECYCLE] La sesión {session_id} ha sido cerrada explícitamente.")
-            # Borrar de forma segura la sesión del servicio en memoria de ADK para liberar memoria
             try:
                 await session_service.delete_session(app_name="cadio-agente", user_id=phone, session_id=session_id)
-                # Borrado local en caso de fallback
                 MOCK_ACTIVE_SESSIONS.pop(phone, None)
             except Exception as e:
                 print(f"[SESSION ERROR] Error borrando sesión de ADK: {e}")
-        else:
-            # Si sigue abierta, actualizamos su marca de última interacción
-            update_session_timestamp(phone, session_id, account_sid)
             
         # 5. Despachar el mensaje de salida de vuelta al usuario final a través de Codio
         if response_text:
@@ -203,7 +102,6 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
     except Exception as e:
         print(f"[PROCESS ERROR] Error crítico procesando interacción de IA para {phone}: {e}")
         traceback.print_exc()
-        # Enviar mensaje de error fallback para evitar que el chat quede colgado
         send_outbound_message(
             phone, 
             "Disculpas, estoy experimentando dificultades técnicas temporales. Por favor, reintenta tu consulta en unos momentos. 🩺",
@@ -229,45 +127,11 @@ async def handle_codio_webhook(request: Request, background_tasks: BackgroundTas
         account_sid = data.get("accountSid", "AC_default")
         session_id = data.get("sessionId")
         
-        if not phone or not body_text:
-            print("[WEBHOOK ERROR] El payload no contiene campos 'phone' o 'body' válidos.")
-            raise HTTPException(status_code=400, detail="Missing phone or body fields")
+        if not phone or not body_text or not session_id:
+            print("[WEBHOOK ERROR] El payload no contiene campos requeridos ('phone', 'body', 'sessionId').")
+            raise HTTPException(status_code=400, detail="Missing required payload fields")
             
-        if not session_id:
-            # Fallback en caso de que no venga el session_id (ej. pruebas directas antiguas)
-            session_id = resolve_active_session(phone)
-        
-        # Verificar el modo de atención de la sesión en Firestore
-        db = get_firestore_client()
-        if db:
-            try:
-                # Ruta SaaS oficial: cuentas/{account_sid}/sesiones/{session_id}
-                sesion_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
-                sesion_doc = sesion_ref.get()
-                if sesion_doc.exists:
-                    sesion_data = sesion_doc.to_dict()
-                    atencion = sesion_data.get("atencion", {})
-                    modo = atencion.get("modo", "bot")
-                    
-                    if modo in ["en_atencion_humana", "esperando_asesor"]:
-                        print(f"[WEBHOOK] Ignorando mensaje de {phone} (Sesión: {session_id}) porque está en modo: {modo}")
-                        return {"status": "ignored", "reason": f"session_in_human_attention_{modo}"}
-                    
-                    # Asegurar que comience en modo bot si no tiene atencion inicializada
-                    if "atencion" not in sesion_data:
-                        sesion_ref.update({
-                            "atencion": {
-                                "modo": "bot",
-                                "asesor_id": None,
-                                "equipo_id": None,
-                                "solicitado_at": None
-                            }
-                        })
-            except Exception as e:
-                print(f"[WEBHOOK WARNING] Error al consultar estado de atención en Firestore: {e}")
-            
-        # 2. Despachar el procesamiento pesado del Agente ADK a una tarea de fondo (asíncrona)
-        # Esto permite responderle 200 OK inmediatamente al webhook de Codio
+        # Despachar el procesamiento pesado del Agente ADK a una tarea de fondo (asíncrona)
         background_tasks.add_task(process_agent_interaction, phone, body_text, session_id, account_sid)
         
         return {"status": "accepted", "session_id": session_id}
