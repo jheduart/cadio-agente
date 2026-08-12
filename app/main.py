@@ -31,8 +31,8 @@ except Exception as e:
     print(f"[STARTUP ERROR] Error inicializando componentes ADK: {e}")
     traceback.print_exc()
 
-def send_outbound_message(phone: str, message: str, account_sid: str = "AC_default"):
-    """Llama de forma síncrona a la API de salida de Codio para responder por WhatsApp."""
+def send_outbound_message(phone: str, message: str, account_sid: str = "AC_default", session_id: str = None):
+    """Llama de forma síncrona a la API de salida de Codio para responder por WhatsApp o Web."""
     url = f"{CODIO_API_URL}/api/v1/messages/send"
     payload = {
         "to": phone,
@@ -40,8 +40,10 @@ def send_outbound_message(phone: str, message: str, account_sid: str = "AC_defau
         "body": message,
         "accountSid": account_sid
     }
+    if session_id:
+        payload["sessionId"] = session_id
     
-    print(f"[OUTBOUND] Enviando respuesta a Codio para: {phone} (Cuenta: {account_sid})...")
+    print(f"[OUTBOUND] Enviando respuesta a Codio para: {phone} (Cuenta: {account_sid}, Sesión: {session_id})...")
     try:
         response = requests.post(url, json=payload, headers={"x-account-sid": account_sid}, timeout=10)
         if response.status_code == 200:
@@ -95,7 +97,7 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
             
         # 5. Despachar el mensaje de salida de vuelta al usuario final a través de Codio
         if response_text:
-            send_outbound_message(phone, response_text, account_sid)
+            send_outbound_message(phone, response_text, account_sid, session_id)
         else:
             print("[ADK WARNING] El agente no generó respuesta de texto final.")
             
@@ -105,7 +107,8 @@ async def process_agent_interaction(phone: str, message_body: str, session_id: s
         send_outbound_message(
             phone, 
             "Disculpas, estoy experimentando dificultades técnicas temporales. Por favor, reintenta tu consulta en unos momentos. 🩺",
-            account_sid
+            account_sid,
+            session_id
         )
 
 @app.post("/webhook")
@@ -127,6 +130,15 @@ async def handle_codio_webhook(request: Request, background_tasks: BackgroundTas
         account_sid = data.get("accountSid", "AC_default")
         session_id = data.get("sessionId")
         
+        # Interceptar tipos multimedia para evitar pasar HTML plano al agente Gemini ADK
+        msg_type = data.get("type", "text")
+        if msg_type == "image":
+            body_text = "[El usuario ha enviado una imagen/foto]"
+        elif msg_type == "video":
+            body_text = "[El usuario ha enviado un video]"
+        elif msg_type == "document":
+            body_text = "[El usuario ha enviado un documento/archivo]"
+
         if not phone or not body_text or not session_id:
             print("[WEBHOOK ERROR] El payload no contiene campos requeridos ('phone', 'body', 'sessionId').")
             raise HTTPException(status_code=400, detail="Missing required payload fields")

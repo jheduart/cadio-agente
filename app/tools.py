@@ -196,8 +196,14 @@ def end_conversation(summary_of_session: str, tool_context: ToolContext) -> Dict
 
     if db:
         try:
+            # Obtener el canal activo antes de cerrar la sesión
+            session_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
+            session_snap = session_ref.get()
+            session_data = session_snap.to_dict() if session_snap.exists else {}
+            canal_activo = session_data.get("canalActivo", "whatsapp")
+
             # 1. Actualizar el estado y resumen en la colección SaaS de sesiones
-            db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id).update({
+            session_ref.update({
                 "estado": "cerrada",
                 "cerradaAt": datetime.datetime.utcnow(),
                 "resumenBot": summary_of_session
@@ -207,6 +213,28 @@ def end_conversation(summary_of_session: str, tool_context: ToolContext) -> Dict
                 "sesionActivaId": None
             })
             print(f"[LIFECYCLE] Sesión SaaS {session_id} marcada como cerrada en Firestore con éxito.")
+
+            # 3. Notificación forzada por WhatsApp de citas médicas importantes
+            if canal_activo == "web" and summary_of_session:
+                summary_lower = summary_of_session.lower()
+                is_appointment = any(kw in summary_lower for kw in ["cita", "turno", "agend", "reserva", "dermatólog", "médic"])
+                if is_appointment:
+                    print(f"[LIFECYCLE] Detectada cita médica en Chat Web al cerrar. Despachando resumen informativo a WhatsApp de forma forzada.")
+                    import requests
+                    CODIO_API_URL = os.environ.get("CODIO_API_URL", "http://localhost:8080")
+                    payload = {
+                        "to": phone,
+                        "type": "text",
+                        "body": f"🩺 *Resumen de tu Cita Médica en Cadio Salud* 🩺\n\nHemos registrado la siguiente información importante sobre tu consulta web:\n\n{summary_of_session}\n\n¡Gracias por confiar en nosotros!",
+                        "accountSid": account_sid,
+                        "sessionId": session_id,
+                        "forceChannel": "whatsapp"
+                    }
+                    try:
+                        resp = requests.post(f"{CODIO_API_URL}/api/v1/messages/send", json=payload, headers={"x-account-sid": account_sid}, timeout=10)
+                        print(f"[LIFECYCLE] Despacho de resumen por WhatsApp completado con estado: {resp.status_code}")
+                    except Exception as req_err:
+                        print(f"[LIFECYCLE ERROR] No se pudo enviar el resumen por WhatsApp: {req_err}")
         except Exception as e:
             print(f"[LIFECYCLE ERROR] Error interactuando con Firestore SaaS en end_conversation: {e}")
             traceback.print_exc()
