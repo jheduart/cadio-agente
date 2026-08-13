@@ -21,12 +21,15 @@ print(f"[STARTUP] Inicializando Cadio Agente en FastAPI...")
 print(f"[STARTUP] PROJECT_ID: {PROJECT_ID}")
 print(f"[STARTUP] CODIO_API_URL: {CODIO_API_URL}")
 
-# Inicializar componentes de ADK de forma global
+# Inicializar componentes de ADK y Firestore Singleton de forma global
 try:
     cadio_agent = create_cadio_agent()
     session_service = InMemorySessionService()
     runner = Runner(agent=cadio_agent, app_name="cadio-agente", session_service=session_service)
     print("[STARTUP] Componentes de Google ADK inicializados exitosamente.")
+    
+    # Pre-calentar el cliente de Firestore para evitar la latencia del canal gRPC en la primera llamada de derivar_a_asesor
+    get_firestore_client()
 except Exception as e:
     print(f"[STARTUP ERROR] Error inicializando componentes ADK: {e}")
     traceback.print_exc()

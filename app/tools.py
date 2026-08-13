@@ -9,13 +9,20 @@ from google.adk.tools import ToolContext
 MOCK_APPOINTMENTS: Dict[str, List[Dict[str, Any]]] = {}
 MOCK_ACTIVE_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
+_db_client = None
+
 def get_firestore_client():
-    """Inicializa y retorna el cliente de Firestore si las credenciales están disponibles."""
+    """Inicializa y retorna el cliente de Firestore reutilizando el singleton global para evitar latencias de autenticación."""
+    global _db_client
+    if _db_client is not None:
+        return _db_client
+
     try:
         from google.cloud import firestore
         project_id = os.environ.get("PROJECT_ID", "proveedores-dev")
-        # Si no hay credenciales locales, firestore.Client() lanzará una excepción
-        return firestore.Client(project=project_id)
+        _db_client = firestore.Client(project=project_id)
+        print(f"[FIRESTORE] Cliente Singleton inicializado para proyecto '{project_id}'")
+        return _db_client
     except Exception as e:
         print(f"[FIRESTORE WARNING] Corriendo en modo local simulado (no se pudo conectar a Firestore): {e}")
         return None
