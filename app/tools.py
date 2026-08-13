@@ -311,6 +311,9 @@ def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, Any]:
                     json={"equipo_id": equipo_id, "motivo": motivo},
                     headers={
                         "Authorization": "Bearer mock-token-bot",
+                        "X-Cron-Secret": "codio-cron-secret-dev",
+                        "x-account-sid": account_sid,
+                        "x-cuenta-id": account_sid,
                         "Content-Type": "application/json"
                     },
                     timeout=5
