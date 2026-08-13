@@ -274,7 +274,11 @@ def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, Any]:
     if account_sid == "AC_default" and tool_context.state:
         account_sid = tool_context.state.get("account_sid", "AC_default")
 
-    print(f"[HANDOFF] Ejecutando derivar_a_asesor para sesión {session_id} | Teléfono: {phone} | Cuenta: {account_sid} | Motivo: {motivo}")
+    equipo_id = "equipo_soporte_default"
+    if tool_context.state and tool_context.state.get("equipo_id"):
+        equipo_id = tool_context.state.get("equipo_id")
+
+    print(f"[HANDOFF] Ejecutando derivar_a_asesor para sesión {session_id} | Teléfono: {phone} | Cuenta: {account_sid} | Equipo: {equipo_id} | Motivo: {motivo}")
 
     tool_context.state["session_closed"] = True
 
@@ -288,6 +292,7 @@ def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, Any]:
             sesion_ref.update({
                 "atencion.modo": "esperando_asesor",
                 "atencion.motivo_derivacion": motivo,
+                "atencion.equipo_id": equipo_id,
                 "atencion.solicitado_at": datetime.datetime.utcnow()
             })
             

@@ -152,6 +152,71 @@ async def handle_codio_webhook(request: Request, background_tasks: BackgroundTas
         print(f"[WEBHOOK ERROR] Error procesando solicitud: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/v1/chat")
+async def direct_chat(request: Request):
+    """Endpoint directo para pruebas desde Postman que crea la sesión de forma dinámica si no existe."""
+    try:
+        payload = await request.json()
+        user_id = payload.get("user_id")
+        session_id = payload.get("session_id")
+        message = payload.get("message")
+        account_sid = payload.get("account_sid", "AC_default")
+
+        if not user_id or not session_id or not message:
+            raise HTTPException(status_code=400, detail="Faltan campos requeridos: user_id, session_id, message")
+
+        # 1. Asegurar que la sesión existe en el InMemorySessionService de ADK
+        session = await session_service.get_session(app_name="cadio-agente", user_id=user_id, session_id=session_id)
+        if session is None:
+            await session_service.create_session(app_name="cadio-agente", user_id=user_id, session_id=session_id)
+            session = await session_service.get_session(app_name="cadio-agente", user_id=user_id, session_id=session_id)
+
+        # 2. Inyectar variables críticas del contexto en el estado de sesión para las herramientas
+        session.state["phone"] = user_id
+        session.state["session_id"] = session_id
+        session.state["account_sid"] = account_sid
+
+        # 3. Ejecutar el agente ADK de forma asíncrona
+        response_text = ""
+        print(f"[DIRECT CHAT] Ejecutando agente para {user_id} en sesión {session_id}...")
+        
+        new_msg = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=message)]
+        )
+        
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=new_msg
+        ):
+            if event.is_final_response():
+                if event.content and event.content.parts:
+                    response_text = event.content.parts[0].text
+
+        # 4. Verificar si la herramienta end_conversation marcó la sesión como cerrada
+        is_closed = session.state.get("session_closed", False)
+        if is_closed:
+            print(f"[DIRECT CHAT] La sesión {session_id} ha sido cerrada explícitamente.")
+            try:
+                await session_service.delete_session(app_name="cadio-agente", user_id=user_id, session_id=session_id)
+                MOCK_ACTIVE_SESSIONS.pop(user_id, None)
+            except Exception as e:
+                print(f"[SESSION ERROR] Error borrando sesión de ADK: {e}")
+
+        return {
+            "success": True,
+            "user_id": user_id,
+            "session_id": session_id,
+            "response": response_text,
+            "session_closed": is_closed
+        }
+
+    except Exception as e:
+        print(f"[DIRECT CHAT ERROR] Error procesando interacción directa: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 def health_check():
     """Health check endpoint para Cloud Run."""
