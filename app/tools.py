@@ -286,17 +286,39 @@ def derivar_a_asesor(motivo: str, tool_context: ToolContext) -> Dict[str, Any]:
     
     if db:
         try:
-            # Actualizar únicamente el estado de atención de la sesión en Firestore
+            # 1. Actualizar de forma atómica el estado de atención de la sesión en Firestore usando set + merge
             sesion_ref = db.collection("cuentas").document(account_sid).collection("sesiones").document(session_id)
             
-            sesion_ref.update({
-                "atencion.modo": "esperando_asesor",
-                "atencion.motivo_derivacion": motivo,
-                "atencion.equipo_id": equipo_id,
-                "atencion.solicitado_at": datetime.datetime.utcnow()
-            })
+            sesion_ref.set({
+                "estado": "abierta",
+                "atencion": {
+                    "modo": "esperando_asesor",
+                    "motivo_derivacion": motivo,
+                    "equipo_id": equipo_id,
+                    "asesor_id": None,
+                    "solicitado_at": datetime.datetime.utcnow()
+                }
+            }, merge=True)
             
             print(f"[HANDOFF] Sesión {session_id} marcada exitosamente en Firestore como 'esperando_asesor'")
+
+            # 2. Llamar al endpoint de la API del Panel para disparar el ruteo PUSH automático
+            import requests
+            panel_api_url = os.environ.get("PANEL_API_URL", "https://codio-panel-api-dev-ekczug53zq-uc.a.run.app")
+            try:
+                deriv_resp = requests.post(
+                    f"{panel_api_url}/api/sesiones/{session_id}/derivar",
+                    json={"equipo_id": equipo_id, "motivo": motivo},
+                    headers={
+                        "Authorization": "Bearer mock-token-bot",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=5
+                )
+                print(f"[HANDOFF] Notificación enviada a Panel API ({deriv_resp.status_code}): {deriv_resp.text}")
+            except Exception as req_err:
+                print(f"[HANDOFF WARNING] No se pudo notificar a Panel API para ruteo PUSH: {req_err}")
+
         except Exception as e:
             print(f"[HANDOFF ERROR] Error al guardar derivación en Firestore: {e}")
             import traceback
